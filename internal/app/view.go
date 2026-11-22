@@ -354,7 +354,7 @@ func (a *App) main(c *ui.Context, docked float32) {
 				a.splitView(c)
 				return
 			}
-			a.toolbar(c)
+			a.toolbar(c, a.library.open && panel <= 0.5 && winNeedsCompactToolbar(c, docked, a.win))
 			card := ui.Themed(c.Key("card"), documentTheme(a.paperDark)).Grow(1).MinHeight(0).Radius(10).
 				Shadow(0, 1, 4, 0, cardShadow(t)).Border(1, t.Border.Alpha(0.35)).Clip()
 			w, _ := c.Size()
@@ -464,7 +464,7 @@ func (a *App) documentContent(c *ui.Context, d *document, cardWidth float32) {
 // toolbar is the row above the card: the history's arrows, the address
 // of the document, as Arc's, the editor's word count and format menu,
 // and the more menu. It drags the window.
-func (a *App) toolbar(c *ui.Context) {
+func (a *App) toolbar(c *ui.Context, compact bool) {
 	bar := c.TitleBar()
 	// The sidebar reserves the left controls; Windows and Linux can keep
 	// their window buttons on the right, over this toolbar instead.
@@ -479,6 +479,12 @@ func (a *App) toolbar(c *ui.Context) {
 		toolbar.Clip()
 	}
 	toolbar.Children(func() {
+		if compact {
+			ui.Spacer(c)
+			a.moreMenu(c)
+			windowButtons(c, a.win)
+			return
+		}
 		if a.folded() {
 			ui.Box(c).Width(bar.Left + 4)
 			if iconButton(c, "show-sidebar", iconSidebar, i18n.T("展开侧边栏"), a.withKey(i18n.T("展开侧边栏"), "sidebar"), false).Clicked() {
@@ -507,6 +513,9 @@ func (a *App) toolbar(c *ui.Context) {
 			a.toggleQA()
 		}
 		a.moreMenu(c)
+		if a.qa.shown <= 0.5 {
+			windowButtons(c, a.win)
+		}
 	})
 }
 

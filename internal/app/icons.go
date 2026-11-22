@@ -13,6 +13,8 @@ func lucide(body string) *ui.SVG {
 
 var (
 	iconWindowBack     = lucide(`<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="m9 16 3-3 3 3"/>`)
+	iconWindowFrame    = lucide(`<rect width="16" height="16" x="4" y="4" rx="2"/>`)
+	iconWindowRestore  = lucide(`<rect width="12" height="12" x="4" y="8" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/>`)
 	iconSidebar        = lucide(`<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/>`)
 	iconBack           = lucide(`<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>`)
 	iconForward        = lucide(`<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>`)

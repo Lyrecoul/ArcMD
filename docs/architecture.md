@@ -22,6 +22,28 @@ serve a future CLI or plugin host.
 `internal/app` follows MyGo's immediate mode: `App` is the state, and
 `App.View(c)` rebuilds the window from it every frame.
 
+The main and detached document windows share `newAppWindow` and always use
+ArcMD's window appearance, with no preference to switch it off. macOS keeps
+its native frame. Windows requests DWM rounding and a subtle active border
+where supported; DWM owns the silhouette and shadow. On composited Linux
+displays with alpha support, ArcMD clips the window surface to rounded corners
+and draws its outline without replacing native resize hit targets. On KDE
+Wayland, MyGo requests client decorations before mapping; ArcMD supplies
+the caption controls in the existing top toolbar and calls the native window
+actions. The frame adds no title row, and the native menu stays accessible via
+Alt or F10 without occupying a permanent row. Other SSD-first compositors and
+displays without alpha compositing keep the existing frame.
+Maximized, fullscreen, and tiled windows need not retain rounded corners.
+
+Before release, check both window types on macOS, Windows 11, GNOME Wayland,
+KDE Wayland, and a composited X11/XWayland session. Use desktop captures to
+inspect the outer silhouette; in-app snapshots cannot verify it. Check that
+maximizing, tiling, and entering fullscreen do not leave corner gaps, and that
+restoring a rounded floating window brings its corners back. Exercise caption
+buttons, toolbar drag, edge and corner resize, and close cancellation on each
+platform. On Windows, also exercise Snap keyboard shortcuts and maximize-button
+hover. Validate that unsupported environments retain usable system decorations.
+
 | File | Role |
 | --- | --- |
 | `app.go` | State, first run, window options, actions (open, new, switch space, pin, trash) |

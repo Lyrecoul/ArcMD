@@ -19,6 +19,7 @@ func (a *App) splitView(c *ui.Context) {
 	a.syncSplit()
 	s := a.split
 	bar := c.TitleBar()
+	buttons := a.qa.shown <= 0.5 && windowButtonsVisible(a.win)
 	if a.folded() {
 		ui.Row(c.Key("split-window-bar")).Height(max(36, bar.Height)).Padding(0, bar.Right, 0, bar.Left+4).AlignItems(ui.Center).DragWindow().Children(func() {
 			if iconButton(c, "sidebar", iconSidebar, i18n.T("展开侧边栏"), a.withKey(i18n.T("展开侧边栏"), "sidebar"), false).Clicked() {
@@ -26,6 +27,14 @@ func (a *App) splitView(c *ui.Context) {
 			}
 			ui.Spacer(c)
 			a.moreMenu(c)
+			if buttons {
+				windowButtons(c, a.win)
+			}
+		})
+	} else if buttons {
+		ui.Row(c.Key("split-window-bar")).Height(36).AlignItems(ui.Center).DragWindow().Children(func() {
+			ui.Spacer(c)
+			windowButtons(c, a.win)
 		})
 	} else {
 		// Left controls sit above the sidebar. Right controls need a full

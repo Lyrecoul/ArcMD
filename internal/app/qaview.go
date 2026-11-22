@@ -60,6 +60,7 @@ func (a *App) qaPanel(c *ui.Context) {
 				if iconButton(c, "qa-close", iconX, i18n.T("关闭问答"), a.withKey(i18n.T("关闭问答"), "ask"), false).Clicked() {
 					a.qa.open = false
 				}
+				windowButtons(c, a.win)
 			})
 			ui.Column(c.Key("qa-card")).Grow(1).MinHeight(0).Radius(10).Background(glass(t)).
 				Border(1, t.Border.Alpha(0.35)).Clip().Children(func() { a.qaBody(c, sp.ID, sp.Name, s) })

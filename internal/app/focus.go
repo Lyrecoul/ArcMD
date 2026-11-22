@@ -124,6 +124,7 @@ func (a *App) focusView(c *ui.Context) {
 			if exit.Clicked() {
 				a.toggleFocus()
 			}
+			windowButtons(c, a.win)
 		})
 		card := ui.Themed(c.Key("card"), documentTheme(a.paperDark)).Grow(1).MinHeight(0).Radius(10).
 			Shadow(0, 1, 4, 0, cardShadow(t)).Border(1, t.Border.Alpha(0.35)).Clip()

@@ -260,6 +260,14 @@ func separator(t *ui.Theme) ui.Color {
 	return pick(t, black.Alpha(0.09), white.Alpha(0.12))
 }
 
+// windowFrameInk is opaque because DWM border colors cannot carry alpha.
+func windowFrameInk(dark bool) ui.Color {
+	if dark {
+		return ui.RGB(73, 71, 77)
+	}
+	return ui.RGB(190, 187, 193)
+}
+
 // hoverFill is the fill of a row under the pointer on the chrome.
 func hoverFill(t *ui.Theme) ui.Color {
 	return pick(t, black.Alpha(0.045), white.Alpha(0.07))
