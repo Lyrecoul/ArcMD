@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Build a native Arch Linux x86-64 package with `makepkg`, including the `arcmd` command, desktop launcher, and document associations. See the [build guide](docs/building.md#arch-linux-x86-64).
+
 ## 0.2.5
 
 This release adds **Sidebar Copy, Paste, and Duplicate** for documents, folders, and multi-selections ([#10](https://github.com/Ciao1019/ArcMD/issues/10), [#39](https://github.com/Ciao1019/ArcMD/pull/39)), **streaming Responses & Chat Completions protocol support** for Space Q&A ([#23](https://github.com/Ciao1019/ArcMD/pull/23)), **crisp math formula rendering, content-aware expanding tables, narrow-window sidebar hysteresis, and an optional Autosave toggle** ([#32](https://github.com/Ciao1019/ArcMD/issues/32)), plus targeted fixes for table row selection crashes ([#34](https://github.com/Ciao1019/ArcMD/issues/34), [#35](https://github.com/Ciao1019/ArcMD/pull/35)) and literal plain-text clipboard copying.

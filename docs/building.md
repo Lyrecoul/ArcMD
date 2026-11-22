@@ -23,6 +23,26 @@ alt text in both `README.md` (Chinese) and `README.en.md` (English). The README'
 to the workflow configuration; it does not claim a passing CI run. Download cards
 link to the releases page until versioned packages are published.
 
+## Arch Linux (x86-64)
+
+With Go and `base-devel` installed, run these commands as a regular user:
+
+```sh
+CGO_ENABLED=0 go run github.com/egoist/mygo/cmd/mygo@v0.10.0 build -platform linux/amd64
+(cd dist/linux-amd64 && makepkg --syncdeps --clean)
+```
+
+MyGo generates the `PKGBUILD` and its inputs from `mygo.json`. With the
+default `makepkg` configuration, the package is written to
+`dist/linux-amd64/arcmd-<version>-1-x86_64.pkg.tar.zst`. For example:
+
+```sh
+sudo pacman -U dist/linux-amd64/arcmd-0.2.5-1-x86_64.pkg.tar.zst
+```
+
+Launch ArcMD from the desktop menu or with `arcmd`. Use `pacman -U` with
+the next package to upgrade the system installation, not the in-app updater.
+
 ## GitHub Actions
 
 [CI and packages](../.github/workflows/build.yml) runs on pull requests, pushes to
