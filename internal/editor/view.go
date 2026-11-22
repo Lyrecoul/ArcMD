@@ -13,18 +13,20 @@ import (
 	"github.com/Ciao1019/ArcMD/internal/document"
 	"github.com/Ciao1019/ArcMD/internal/i18n"
 	"github.com/Ciao1019/ArcMD/internal/mermaid"
+	"github.com/Ciao1019/ArcMD/internal/pdfdoc"
 	"github.com/Ciao1019/ArcMD/internal/tex"
 	"github.com/Ciao1019/ArcMD/internal/whiteboard"
 	"github.com/egoist/mygo/ui"
 )
 
 type layoutPageKey struct {
-	has                          bool
-	page                         Page
-	fontSize, lineHeight, column float32
-	fontFamily                   string
-	noteKey                      string
-	codeNoWrap                   bool
+	has                           bool
+	page                          Page
+	fontSize, lineHeight, column  float32
+	fontFamily                    string
+	noteKey                       string
+	codeNoWrap                    bool
+	codeMaxHeight, imageMaxHeight float32
 }
 
 func sameLayoutPageKey(a, b layoutPageKey) bool {
@@ -35,6 +37,8 @@ func sameLayoutPageKey(a, b layoutPageKey) bool {
 		a.column == b.column &&
 		a.noteKey == b.noteKey &&
 		a.codeNoWrap == b.codeNoWrap &&
+		a.codeMaxHeight == b.codeMaxHeight &&
+		a.imageMaxHeight == b.imageMaxHeight &&
 		samePage(a.page, b.page)
 }
 
@@ -53,54 +57,54 @@ type Editor struct {
 	noAutoPair    bool
 	hoverID       string
 	*Buffer
-	Scroll                           ui.ScrollState
-	RequestFocus                     bool
-	handleIDs, decorationIDs         map[string]int
-	rowIDs                           map[string]int
-	rowSpace, decorationSpace        spatialIndex
-	rowYOff, decYOff                 fenwick64
-	handleYOff, foldYOff             fenwick64
-	resizerYOff, outlineYOff         fenwick64
-	handleEnds                       []blockSliceEnd
-	hasLazyY                         bool
-	rows                             []row
-	decorations                      []decoration
-	handles                          []blockHandle
-	resizers                         []columnHandle
-	cache                            map[string]cachedShape
-	cacheClock                       uint64
-	heightHints                      map[string]heightHint
-	images                           map[string]ImageResource
-	imageCaptionID                   string
-	imageViewer                      imageViewer
-	width, height, viewport, padding float32
-	cacheRevision                    uint64
-	resizePending                    bool
-	resizeScroll                     float32
-	windowResize                     windowResize
-	resizeBatch                      bool
-	resizeRemaining                  int
-	layoutInputs                     layoutInputs
-	cacheTheme                       ui.Theme
-	ready, focused, dragging, reveal bool
-	selectionDrag                    selectionDrag
-	preferredX                       float32
-	vertical                         bool
-	lastInput                        time.Time
-	dragID                           string
-	dropIndex                        int
-	resizing                         *columnHandle
-	resizeX                          float32
-	menuOpen                         bool
-	menuID                           string
-	menuSub                          string
-	menuScroll                       ui.ScrollState
-	tableSel                         tableSelection
-	cellFillOpen, cellFillOpened     bool
-	foldButtons                      []foldButton
-	revealKey                        [2]uint64
-	find                             finder
-	revealAt                         *ui.TextInputRange
+	Scroll                                         ui.ScrollState
+	RequestFocus                                   bool
+	handleIDs, decorationIDs                       map[string]int
+	rowIDs                                         map[string]int
+	rowSpace, decorationSpace                      spatialIndex
+	rowYOff, decYOff                               fenwick64
+	handleYOff, foldYOff                           fenwick64
+	resizerYOff, outlineYOff                       fenwick64
+	handleEnds                                     []blockSliceEnd
+	hasLazyY                                       bool
+	rows                                           []row
+	decorations                                    []decoration
+	handles                                        []blockHandle
+	resizers                                       []columnHandle
+	cache                                          map[string]cachedShape
+	cacheClock                                     uint64
+	heightHints                                    map[string]heightHint
+	images                                         map[string]ImageResource
+	imageCaptionID                                 string
+	imageViewer                                    imageViewer
+	width, height, viewport, padding, rightPadding float32
+	cacheRevision                                  uint64
+	resizePending                                  bool
+	resizeScroll                                   float32
+	windowResize                                   windowResize
+	resizeBatch                                    bool
+	resizeRemaining                                int
+	layoutInputs                                   layoutInputs
+	cacheTheme                                     ui.Theme
+	ready, focused, dragging, reveal               bool
+	selectionDrag                                  selectionDrag
+	preferredX                                     float32
+	vertical                                       bool
+	lastInput                                      time.Time
+	dragID                                         string
+	dropIndex                                      int
+	resizing                                       *columnHandle
+	resizeX                                        float32
+	menuOpen                                       bool
+	menuID                                         string
+	menuSub                                        string
+	menuScroll                                     ui.ScrollState
+	tableSel                                       tableSelection
+	cellFillOpen, cellFillOpened                   bool
+	foldButtons                                    []foldButton
+	revealKey                                      [2]uint64
+	find                                           finder
+	revealAt                                       *ui.TextInputRange
 	// lastAnnotation is the hand-drawn mark the bar's pen applies;
 	// drawIn the new mark drawing itself; annotatePanel the mark picker.
 	lastAnnotation, lastAnnotationColor string
@@ -179,6 +183,8 @@ type Editor struct {
 	printPageH      float32
 	mapTablePreview bool // compact cell metrics for read-only document map previews
 	mapMathPreview  bool // compact formula width (no full-column \tag stretch) in document map
+	mapListNumber   int  // explicit numbered-list ordinal for single-block document map previews
+	mapListIndent   int  // original list indent level for numbered-list marker style (1., a., i.)
 	// typewriter keeps the caret's line at the middle of the page; dim
 	// fades the blocks but the caret's, as focus mode does.
 	typewriter, dim bool
@@ -208,6 +214,21 @@ type Editor struct {
 	saveBlockAsWhiteboard       func(string, *whiteboard.Scene)
 	boardWikiSuggest            func(string) []string
 	openWikiSplit               func(string, bool)
+	pdfBrowsing, laidPDF        string
+	pdfFocusPending             bool
+	asyncPDF                    bool
+	pdfModalID, laidModalPDF    string
+	pdfModalFocusPending        bool
+	pdfHeights                  map[string]float32
+	pdfRestPages                map[string]int
+	pdfDragID                   string
+	pdfDragStartH               float32
+	pdfs                        map[string]*PDFViewer
+	pdfEmbedRev                 map[string]uint64
+	embedPDFs                   map[string]embedPDFCache
+	loadPDF                     func(string) (*pdfdoc.Document, uint64, error)
+	openPDF                     func(string, bool)
+	attachPDF                   func()
 	laidFindKey                 string
 	bindings                    map[string]Combo
 	openWiki, openTag           func(string)
@@ -224,6 +245,14 @@ type Editor struct {
 	codeScrollX                 map[string]float32
 	codeBarDrag                 string
 	codeBarGrab                 float32
+	codeMaxHeight               float32
+	imageMaxHeight              float32
+	codeExpanded                map[string]bool
+	imageExpanded               map[string]bool
+	codeScrollY                 map[string]float32
+	imageScrollY                map[string]float32
+	codeVBarDrag, imageVBarDrag string
+	codeVBarGrab, imageVBarGrab float32
 	// bookmarks are the host's marks on the page (bookmarks.go).
 	bookmarks bookmarkState
 	// reserved are keys the host takes, which the page leaves alone.
@@ -309,6 +338,18 @@ type row struct {
 	boardErr     string
 	boardError   *ui.TextLayout
 
+	pdfDoc      *pdfdoc.Document
+	pdfRect     ui.Rect
+	pdfBrowsing bool
+	pdfEmbed    bool
+	pdfErr      string
+	pdfError    *ui.TextLayout
+
+	codeContentH   float32
+	codeViewH      float32
+	codeCompact    bool
+	codeExpandable bool
+
 	yApplied float64
 }
 
@@ -343,6 +384,9 @@ type decoration struct {
 	boardEditing   bool
 	boardEmbed     bool
 	boardURL       string
+	pdfBrowsing    bool
+	pdfEmbed       bool
+	pdfURL         string
 	yApplied       float64
 }
 
@@ -525,6 +569,8 @@ type Options struct {
 	Resizing             bool
 	NoAutoPair           bool
 	CodeNoWrap           bool
+	CodeMaxHeight        float32
+	ImageMaxHeight       float32
 	FontSize, LineHeight float32
 	// Column is the text column's width, 0 for 820. Code keeps its monospace.
 	FontFamily   string
@@ -612,6 +658,11 @@ type Options struct {
 	UserWhiteboardLib     func() []whiteboard.LibraryItem
 	SaveWhiteboardLib     func([]whiteboard.LibraryItem)
 	ImportWhiteboardLib   func(onLoad func([]whiteboard.LibraryItem))
+	// PDF embed integration callbacks.
+	LoadPDF   func(url string) (*pdfdoc.Document, uint64, error)
+	OpenPDF   func(url string, split bool)
+	AttachPDF func()
+	AsyncPDF  bool
 }
 
 func New(markdown string) *Editor { return FromOwnedDocument(ImportMarkdown(markdown)) }
@@ -672,6 +723,7 @@ func (e *Editor) SetMarkedText(r *ui.TextInputRange, text string, selected ui.Te
 
 func View(c *ui.Context, e *Editor, o Options) ui.Element {
 	e.services = c.Services()
+	e.asyncPDF = o.AsyncPDF && !c.Instant()
 	// Native window drags do not go through a split divider or the host's
 	// panel animation. Detect them here, including in detached windows.
 	if e.windowResize.active(c) {
@@ -679,6 +731,7 @@ func View(c *ui.Context, e *Editor, o Options) ui.Element {
 		o.Resizing = true
 	}
 	e.noAutoPair, e.autoSpace, e.codeNoWrap = o.NoAutoPair, o.AutoSpace, o.CodeNoWrap
+	e.codeMaxHeight, e.imageMaxHeight = o.CodeMaxHeight, o.ImageMaxHeight
 	if e.ReadOnly {
 		o.Attach = nil
 		o.DropFiles = nil
@@ -703,6 +756,9 @@ func View(c *ui.Context, e *Editor, o Options) ui.Element {
 	e.saveBlockAsWhiteboard = o.SaveBlockAsWhiteboard
 	e.boardWikiSuggest = o.BoardWikiSuggest
 	e.openWikiSplit = o.OpenWikiSplit
+	e.loadPDF = o.LoadPDF
+	e.openPDF = o.OpenPDF
+	e.attachPDF = o.AttachPDF
 	e.header.pickCover = o.PickCover
 	e.bookmarks.marks, e.bookmarks.toggle, e.bookmarks.label, e.bookmarks.key = o.Bookmarks, o.ToggleBookmark, o.LabelBookmark, o.BookmarkKey
 	e.reserved = o.Reserved
@@ -738,6 +794,7 @@ func View(c *ui.Context, e *Editor, o Options) ui.Element {
 		e.stepJump(c)
 		e.stepScrollGlide(c)
 		if e.revealAt != nil && e.viewport > 0 {
+			e.revealCodeOffsetV(e.revealAt.Start)
 			// A find match scrolls to a third of the way down the page.
 			if r, _, ok := e.BoundsForRange(*e.revealAt); ok && (r.Y < e.Scroll.Y+20 || r.Y+r.H > e.Scroll.Y+e.viewport-32) {
 				e.glideScrollTo(c, max(0, r.Y-e.viewport/3), 0.055)
@@ -746,6 +803,7 @@ func View(c *ui.Context, e *Editor, o Options) ui.Element {
 		}
 		if e.reveal && e.viewport > 0 {
 			e.revealCodeCaret()
+			e.revealCodeOffsetV(e.Caret)
 		}
 		if e.reveal && e.viewport > 0 && e.typewriter {
 			// The caret's line stays in the middle of the page.
@@ -807,6 +865,10 @@ func View(c *ui.Context, e *Editor, o Options) ui.Element {
 						e.boardModalFocusPending = true
 					} else if e.boardEditing != "" {
 						e.boardFocusPending = true
+					} else if e.pdfModalID != "" {
+						e.pdfModalFocusPending = true
+					} else if e.pdfBrowsing != "" {
+						e.pdfFocusPending = true
 					} else {
 						surface.Focus()
 						e.lastInput = c.Now()
@@ -845,9 +907,7 @@ func View(c *ui.Context, e *Editor, o Options) ui.Element {
 					return e.input(ev, services.ReadClipboard, services.WriteClipboard, o.OpenLink)
 				})
 				surface.ContextMenu(func(menu *ui.Menu) {
-					menuAction(menu, i18n.T("加粗"), func() { e.Wrap("**") })
-					menuAction(menu, i18n.T("斜体"), func() { e.Wrap("*") })
-					menuAction(menu, i18n.T("插入表格"), func() { e.Engine.Insert(document.Table(3, 3)); e.RequestFocus = true })
+					e.buildContextMenu(menu, services.ReadClipboard, services.WriteClipboard)
 				})
 				caret := !e.ReadOnly && e.focused && (c.Now().Sub(e.lastInput) < time.Second || c.Now().UnixMilli()/530%2 == 0)
 				if e.focused {
@@ -863,9 +923,10 @@ func View(c *ui.Context, e *Editor, o Options) ui.Element {
 				}
 				e.imageControls(c, o)
 				e.boardControls(c, o)
+				e.pdfControls(c, o)
 				e.bookmarkMarks(c)
 				if o.Footer != nil {
-					footer := ui.Column(c.Key("page-footer")).Absolute().Left(e.padding).Top(e.footerTop()).Width(max(80, e.width-2*e.padding))
+					footer := ui.Column(c.Key("page-footer")).Absolute().Left(e.padding).Top(e.footerTop()).Width(e.bodyWidth())
 					footer.Children(func() { o.Footer(c) })
 					if h := footer.LayoutBounds().H; h != e.footerH {
 						e.footerH = h
@@ -888,7 +949,54 @@ func View(c *ui.Context, e *Editor, o Options) ui.Element {
 	e.cropView(c)
 	e.wikiPreview(c, surface, o.PreviewWiki)
 	e.boardModalView(c, o)
+	e.pdfModalView(c, o)
 	return pane
+}
+
+func (e *Editor) buildContextMenu(menu *ui.Menu, read func() string, write func(string)) {
+	hasSelection := e.Anchor != e.Caret || len(e.blocks.ids) > 0
+	if !e.ReadOnly {
+		if menu.Item(i18n.T("剪切")).Shortcut(ui.Cmd, ui.KeyX).Disabled(!hasSelection).Chosen() {
+			e.command("cut", read, write)
+			e.RequestFocus = true
+		}
+	}
+	if menu.Item(i18n.T("复制")).Shortcut(ui.Cmd, ui.KeyC).Disabled(!hasSelection).Chosen() {
+		e.command("copy", read, write)
+		e.RequestFocus = true
+	}
+	if !e.ReadOnly {
+		if menu.Item(i18n.T("粘贴")).Shortcut(ui.Cmd, ui.KeyV).Chosen() {
+			e.command("paste", read, write)
+			e.RequestFocus = true
+		}
+		if menu.Item(i18n.T("粘贴为纯文本")).Shortcut(ui.Cmd|ui.Shift, ui.KeyV).Chosen() {
+			e.command("pasteAndMatchStyle", read, write)
+			e.RequestFocus = true
+		}
+	}
+	menu.Separator()
+	if menu.Item(i18n.T("全选")).Shortcut(ui.Cmd, ui.KeyA).Disabled(e.Len() == 0 && len(e.blocks.ids) == 0).Chosen() {
+		if len(e.blocks.ids) > 0 {
+			e.SelectAllBlocks()
+		} else {
+			e.SetSelection(0, e.Len())
+			e.vertical = false
+		}
+		e.RequestFocus = true
+	}
+	if !e.ReadOnly {
+		menu.Separator()
+		if menu.Item(i18n.T("加粗")).Shortcut(ui.Cmd, ui.KeyB).Chosen() {
+			e.Wrap("**")
+			e.RequestFocus = true
+		}
+		if menu.Item(i18n.T("斜体")).Shortcut(ui.Cmd, ui.KeyI).Chosen() {
+			e.Wrap("*")
+			e.RequestFocus = true
+		}
+		menuAction(menu, i18n.T("插入表格"), func() { e.Engine.Insert(document.Table(3, 3)); e.RequestFocus = true })
+	}
 }
 
 // footerTop is where the host's footer goes: below the last block, and
@@ -922,14 +1030,16 @@ func (e *Editor) layout(o Options) {
 	e.readingSize, e.readingLine, e.fontFamily = o.FontSize, o.LineHeight, o.FontFamily
 	defer func() { e.laidInline = e.inlineEditing }()
 	pageKey := layoutPageKey{
-		has:        true,
-		page:       e.page,
-		fontSize:   o.FontSize,
-		lineHeight: o.LineHeight,
-		fontFamily: o.FontFamily,
-		column:     o.Column,
-		noteKey:    e.noteKey(),
-		codeNoWrap: e.codeNoWrap,
+		has:            true,
+		page:           e.page,
+		fontSize:       o.FontSize,
+		lineHeight:     o.LineHeight,
+		fontFamily:     o.FontFamily,
+		column:         o.Column,
+		noteKey:        e.noteKey(),
+		codeNoWrap:     e.codeNoWrap,
+		codeMaxHeight:  o.CodeMaxHeight,
+		imageMaxHeight: o.ImageMaxHeight,
 	}
 	finishResize := e.resizePending && (!o.Resizing || e.resizeBatch)
 	refreshResize := e.resizePending && e.resizeScroll != e.Scroll.Y
@@ -951,7 +1061,15 @@ func (e *Editor) layout(o Options) {
 			}
 		}
 	}
-	same := !finishResize && !refreshResize && !embedStale && e.ready && e.width == o.Width && e.cacheTheme == *o.Theme && pageSame && e.laidMath == e.mathEditing && e.laidMermaid == e.mermaidEditing && e.laidBoard == e.boardEditing && e.laidModalBoard == e.boardModalID && e.laidFindKey == findKey && e.laidInline == e.inlineEditing
+	if !embedStale && e.loadPDF != nil && len(e.embedPDFs) > 0 {
+		for url, cached := range e.embedPDFs {
+			if _, rev, err := e.loadPDF(url); err == nil && rev != cached.rev {
+				embedStale = true
+				break
+			}
+		}
+	}
+	same := !finishResize && !refreshResize && !embedStale && e.ready && e.width == o.Width && e.cacheTheme == *o.Theme && pageSame && e.laidMath == e.mathEditing && e.laidMermaid == e.mermaidEditing && e.laidBoard == e.boardEditing && e.laidModalBoard == e.boardModalID && e.laidPDF == e.pdfBrowsing && e.laidModalPDF == e.pdfModalID && e.laidFindKey == findKey && e.laidInline == e.inlineEditing
 	if same && e.cacheRevision == e.Revision() {
 		return
 	}
@@ -986,11 +1104,21 @@ func (e *Editor) layout(o Options) {
 	e.laidMermaid = e.mermaidEditing
 	e.laidBoard = e.boardEditing
 	e.laidModalBoard = e.boardModalID
+	e.laidPDF = e.pdfBrowsing
+	e.laidModalPDF = e.pdfModalID
 	e.laidFindKey = findKey
 	// The text column is 820 wide unless the reader picked another.
 	e.column = columnWidth(o.Column)
-	e.padding = max(46, (o.Width-e.column)/2)
-	width := max(80, o.Width-2*e.padding)
+	centerPad := (o.Width - e.column) / 2
+	if e.printing {
+		e.padding = max(46, centerPad)
+		e.rightPadding = e.padding
+	} else {
+		e.padding = max(80, centerPad)
+		minRight := min(float32(46), max(24, o.Width*0.12))
+		e.rightPadding = max(minRight, centerPad)
+	}
+	width := e.bodyWidth()
 	clear(e.rows)
 	clear(e.decorations)
 	clear(e.handles)
@@ -1152,6 +1280,8 @@ func (e *Editor) layoutOptions() Options {
 		FontFamily:     e.fontFamily,
 		Column:         e.laidPage.column,
 		CodeNoWrap:     e.codeNoWrap,
+		CodeMaxHeight:  e.codeMaxHeight,
+		ImageMaxHeight: e.imageMaxHeight,
 		LoadWhiteboard: e.loadWhiteboard,
 	}
 }
@@ -1204,6 +1334,9 @@ func (e *Editor) blockLayouter(o Options, leafOf func(string) document.Leaf, hid
 			}
 			counters[b.Indent]++
 			number = counters[b.Indent]
+			if e.mapListNumber > 0 {
+				number = e.mapListNumber
+			}
 		default:
 			counters = nil
 		}
@@ -1212,7 +1345,7 @@ func (e *Editor) blockLayouter(o Options, leafOf func(string) document.Leaf, hid
 		cached, ok := e.cache[b.ID]
 		sameShape := ok && cached.key == key && slices.Equal(cached.runs, b.Runs)
 		active := virtualize && (b.ID == caretID || b.ID == anchorID || b.ID == revealID || b.ID == e.dragID || b.ID == e.mathEditing || b.ID == e.mermaidEditing || strings.HasPrefix(e.inlineEditing, b.ID+":"))
-		deferShape := virtualize && !active && leaf.Owner == b.ID && canDeferKind(b.Kind)
+		deferShape := virtualize && !active && leaf.Owner == b.ID && canDeferKind(b.Kind) && !(b.Kind == "code" && e.codeMaxHeight > 0)
 
 		var laid *textLayout
 		var h float32
@@ -1257,10 +1390,12 @@ func (e *Editor) blockLayouter(o Options, leafOf func(string) document.Leaf, hid
 					row.mermaidHidden = true
 				}
 				e.rows = append(e.rows, row)
-				if b.Kind == "code" || b.Kind == "raw" || b.Kind == "math" || b.Kind == "quote" || b.Kind == "callout" || isWhiteboardEmbed(b) {
+				if b.Kind == "code" || b.Kind == "raw" || b.Kind == "math" || b.Kind == "quote" || b.Kind == "callout" || isWhiteboardEmbed(b) || isPDFEmbed(b) {
 					d := decoration{kind: b.Kind, id: b.ID, ownerID: leaf.Owner, rect: ui.Rect{X: x, Y: y, W: w, H: total - gap}}
 					if isWhiteboardEmbed(b) {
 						d.kind, d.id, d.boardEmbed, d.boardURL, d.boardEditing = "whiteboard-embed", b.ID, true, b.URL, row.boardEditing
+					} else if isPDFEmbed(b) {
+						d.kind, d.id, d.pdfEmbed, d.pdfURL, d.pdfBrowsing = "pdf-embed", b.ID, true, b.URL, row.pdfBrowsing
 					} else if isWhiteboardBlock(b) {
 						d.kind, d.label, d.id = "whiteboard", b.Language, b.ID
 					} else if isMermaidBlock(b) {
@@ -1285,10 +1420,12 @@ func (e *Editor) blockLayouter(o Options, leafOf func(string) document.Leaf, hid
 		}
 		_, h = laid.Size()
 		h = max(h, font.Size*font.LineHeight)
-		total := top + h + bottom
-		row := row{leafRevision: e.Revision(), leaf: leaf, layout: laid, rect: ui.Rect{X: x, Y: y, W: w, H: total}, x: x + left, y: y + top, number: number, size: font.Size, tableHeader: header}
+		row := row{leafRevision: e.Revision(), leaf: leaf, layout: laid, rect: ui.Rect{X: x, Y: y, W: w}, x: x + left, y: y + top, number: number, size: font.Size, tableHeader: header}
+		total := e.applyCodeCompact(&row, top, bottom, gap, h)
 		if isWhiteboardEmbed(b) {
 			total = e.layoutWhiteboardEmbed(&row, o, gap)
+		} else if isPDFEmbed(b) {
+			total = e.layoutPDFEmbed(&row, o, gap)
 		} else if b.Kind == "image" {
 			total = e.layoutImage(&row, o)
 		}
@@ -1316,11 +1453,14 @@ func (e *Editor) blockLayouter(o Options, leafOf func(string) document.Leaf, hid
 			e.recordExactHeight(b.ID, e.hintWidthFor(b, shapeWidth), hintH, font, b.Runs)
 		}
 		e.rows = append(e.rows, row)
-		if b.Kind == "code" || b.Kind == "raw" || b.Kind == "math" || b.Kind == "quote" || b.Kind == "callout" || b.Kind == "rule" || isWhiteboardEmbed(b) {
+		if b.Kind == "code" || b.Kind == "raw" || b.Kind == "math" || b.Kind == "quote" || b.Kind == "callout" || b.Kind == "rule" || isWhiteboardEmbed(b) || isPDFEmbed(b) {
 			d := decoration{kind: b.Kind, id: b.ID, ownerID: leaf.Owner, rect: ui.Rect{X: x, Y: y, W: w, H: total - gap}}
 			if isWhiteboardEmbed(b) {
 				d.kind, d.id, d.boardEmbed, d.boardURL, d.boardEditing = "whiteboard-embed", b.ID, true, b.URL, row.boardEditing
 				d.rect = row.boardRect
+			} else if isPDFEmbed(b) {
+				d.kind, d.id, d.pdfEmbed, d.pdfURL, d.pdfBrowsing = "pdf-embed", b.ID, true, b.URL, row.pdfBrowsing
+				d.rect = row.pdfRect
 			} else if isWhiteboardBlock(b) {
 				d.kind, d.label, d.id = "whiteboard", b.Language, b.ID
 				d.boardEditing = row.boardEditing
@@ -1360,6 +1500,9 @@ func (e *Editor) indexedRow(i int) *row {
 			}
 			if r.boardRect.W > 0 {
 				r.boardRect.Y += dy
+			}
+			if r.pdfRect.W > 0 {
+				r.pdfRect.Y += dy
 			}
 			r.yApplied = off
 		}
@@ -1421,6 +1564,9 @@ func (e *Editor) BoundsForRange(r ui.TextInputRange) (ui.Rect, ui.TextInputRange
 	if _, _, availW, _, scrollX, noWrap := e.codeScrollFor(*row); noWrap {
 		rect.X = min(max(row.x, rect.X-scrollX), row.x+availW)
 	}
+	if _, _, viewH, _, scrollY, compact := e.codeVScrollFor(*row); compact {
+		rect.Y = min(max(row.y, rect.Y-scrollY), row.y+max(0, viewH-rect.H))
+	}
 	return rect, ui.TextInputRange{Start: row.leaf.Start + local, End: row.leaf.Start + local}, true
 }
 func (e *Editor) IndexForPoint(point ui.Point) (int, bool) {
@@ -1435,7 +1581,11 @@ func (e *Editor) IndexForPoint(point ui.Point) (int, bool) {
 	if _, _, _, _, scrollX, noWrap := e.codeScrollFor(*best); noWrap {
 		px += scrollX
 	}
-	return best.leaf.Start + best.layout.IndexAt(ui.Point{X: px, Y: point.Y - best.y}), true
+	py := point.Y - best.y
+	if _, _, _, _, scrollY, compact := e.codeVScrollFor(*best); compact {
+		py += scrollY
+	}
+	return best.leaf.Start + best.layout.IndexAt(ui.Point{X: px, Y: py}), true
 }
 
 func (e *Editor) decorationOffset(d decoration) (dx, dy float32) {
@@ -1479,7 +1629,7 @@ func (e *Editor) paint(p *ui.Painter, bounds ui.Rect, t *ui.Theme, caret bool) {
 		slot := ui.Rect{
 			X: bounds.X + e.padding,
 			Y: bounds.Y + plan.slotY,
-			W: max(48, e.width-2*e.padding),
+			W: max(48, e.bodyWidth()),
 			H: max(24, plan.slotH-8),
 		}
 		p.Fill(slot, t.Accent.Alpha(0.055), 8)
@@ -1620,8 +1770,8 @@ func (e *Editor) paint(p *ui.Painter, bounds ui.Rect, t *ui.Theme, caret bool) {
 				}
 			}
 			e.paintMarker(p, bounds, r, t)
-			paintRowBody := func(scrollX float32) {
-				shiftedBounds := ui.Rect{X: bounds.X + dx - scrollX, Y: bounds.Y + dy, W: bounds.W, H: bounds.H}
+			paintRowBody := func(scrollX, scrollY float32) {
+				shiftedBounds := ui.Rect{X: bounds.X + dx - scrollX, Y: bounds.Y + dy - scrollY, W: bounds.W, H: bounds.H}
 				e.paintKeycaps(p, shiftedBounds, r)
 				if e.focused && len(e.blocks.ids) == 0 && selection.End > r.leaf.Start && selection.Start < r.leaf.End && e.inlineMath.blockID != r.leaf.Block.ID {
 					if r.mathHidden && r.math != nil {
@@ -1634,7 +1784,7 @@ func (e *Editor) paint(p *ui.Painter, bounds ui.Rect, t *ui.Theme, caret bool) {
 						local := ui.TextInputRange{Start: max(0, selection.Start-r.leaf.Start), End: min(r.leaf.End, selection.End) - r.leaf.Start}
 						for _, rect := range r.layout.SelectionRects(local) {
 							rect.X += bounds.X + r.x + dx - scrollX - 1.5
-							rect.Y += bounds.Y + r.y + dy
+							rect.Y += bounds.Y + r.y + dy - scrollY
 							rect.W += 3
 							p.Fill(rect, t.Selection, 3.5)
 						}
@@ -1649,6 +1799,9 @@ func (e *Editor) paint(p *ui.Painter, bounds ui.Rect, t *ui.Theme, caret bool) {
 				if e.paintWhiteboardRow(p, bounds, r, t) {
 					return
 				}
+				if e.paintPDFRow(p, bounds, r, t) {
+					return
+				}
 				e.paintAnnotations(p, shiftedBounds, r, true)
 				textColor := t.Text
 				if r.leaf.Block.Kind == "image" && e.imageCaptionID != r.leaf.Block.ID {
@@ -1661,7 +1814,7 @@ func (e *Editor) paint(p *ui.Painter, bounds ui.Rect, t *ui.Theme, caret bool) {
 						textColor = textColor.Alpha(float32(textColor.A) / 255 * op)
 					}
 				}
-				p.TextLayout(r.layout.TextLayout, bounds.X+r.x+dx-scrollX, bounds.Y+r.y+dy, textColor)
+				p.TextLayout(r.layout.TextLayout, bounds.X+r.x+dx-scrollX, bounds.Y+r.y+dy-scrollY, textColor)
 				e.paintInline(p, bounds, r, t)
 				e.paintAnnotations(p, shiftedBounds, r, false)
 				if !e.printing {
@@ -1669,16 +1822,29 @@ func (e *Editor) paint(p *ui.Painter, bounds ui.Rect, t *ui.Theme, caret bool) {
 				}
 				if e.mark != nil && e.mark.End >= r.leaf.Start && e.mark.Start <= r.leaf.End {
 					for _, rect := range r.layout.SelectionRects(ui.TextInputRange{Start: max(0, e.mark.Start-r.leaf.Start), End: min(r.leaf.End, e.mark.End) - r.leaf.Start}) {
-						p.Line(bounds.X+r.x+dx-scrollX+rect.X, bounds.Y+r.y+dy+rect.Y+rect.H-2, bounds.X+r.x+dx-scrollX+rect.X+rect.W, bounds.Y+r.y+dy+rect.Y+rect.H-2, 1, t.Accent)
+						p.Line(bounds.X+r.x+dx-scrollX+rect.X, bounds.Y+r.y+dy-scrollY+rect.Y+rect.H-2, bounds.X+r.x+dx-scrollX+rect.X+rect.W, bounds.Y+r.y+dy-scrollY+rect.Y+rect.H-2, 1, t.Accent)
 					}
 				}
 			}
-			if _, clipBox, _, _, scrollX, noWrap := e.codeScrollFor(r); noWrap {
-				p.Clip(ui.Rect{X: bounds.X + clipBox.X + dx, Y: bounds.Y + clipBox.Y + dy, W: clipBox.W, H: clipBox.H}, 0, func() {
-					paintRowBody(scrollX)
+			_, hClipBox, _, _, scrollX, noWrap := e.codeScrollFor(r)
+			_, vClipBox, _, _, scrollY, compact := e.codeVScrollFor(r)
+			if noWrap || compact {
+				var clip ui.Rect
+				switch {
+				case noWrap && compact:
+					clip = intersectRect(hClipBox, vClipBox)
+				case noWrap:
+					clip = hClipBox
+				default:
+					clip = vClipBox
+				}
+				clip.X += bounds.X + dx
+				clip.Y += bounds.Y + dy
+				p.Clip(clip, 0, func() {
+					paintRowBody(scrollX, scrollY)
 				})
 			} else {
-				paintRowBody(0)
+				paintRowBody(0, 0)
 			}
 		}
 	}
@@ -1687,7 +1853,7 @@ func (e *Editor) paint(p *ui.Painter, bounds ui.Rect, t *ui.Theme, caret bool) {
 		card := ui.Rect{
 			X: bounds.X + e.padding - 8,
 			Y: bounds.Y + e.indexedHandle(plan.first).top - 4 + plan.floatDY,
-			W: max(64, e.width-2*e.padding+16),
+			W: max(64, e.bodyWidth()+16),
 			H: max(28, plan.slotH-4),
 		}
 		p.Shadow(card, 10, 0, 8, 24, 0, e.page.MathShadow)
@@ -1759,7 +1925,7 @@ func (e *Editor) paint(p *ui.Painter, bounds ui.Rect, t *ui.Theme, caret bool) {
 	}
 	if e.dragID != "" && !plan.active && e.dropIndex >= 0 && e.dropIndex < len(e.handles) {
 		y := bounds.Y + e.indexedHandle(e.dropIndex).top - 4
-		p.Fill(ui.Rect{X: bounds.X + e.padding, Y: y - 1, W: e.width - 2*e.padding, H: 2}, t.Accent, 1)
+		p.Fill(ui.Rect{X: bounds.X + e.padding, Y: y - 1, W: e.bodyWidth(), H: 2}, t.Accent, 1)
 	}
 	if e.fileOver >= 0 {
 		e.paintFileDropPreview(p, bounds, t)
@@ -1815,6 +1981,8 @@ func (e *Editor) paintHoverControls(p *ui.Painter, bounds ui.Rect, t *ui.Theme) 
 			e.paintMermaidHover(p, bounds, d, t)
 		case (d.kind == "whiteboard" || d.kind == "whiteboard-embed") && d.id != "":
 			e.paintWhiteboardHover(p, bounds, d, t)
+		case d.kind == "pdf-embed" && d.id != "":
+			e.paintPDFHover(p, bounds, d, t)
 		case d.kind == "code" && d.id != "":
 			if idx, ok := e.rowIDs[d.id]; ok {
 				barBox, _, availW, contentW, scrollX, noWrap := e.codeScrollFor(*e.indexedRow(idx))
@@ -1824,6 +1992,7 @@ func (e *Editor) paintHoverControls(p *ui.Painter, bounds ui.Rect, t *ui.Theme) 
 					p.Scrollbar(ui.Scrollbar{Box: barBox, Horizontal: true, View: availW, Content: contentW, Offset: scrollX}, ui.ScrollbarState{Dragging: e.codeBarDrag == d.id})
 				}
 			}
+			e.paintCodeCompactChrome(p, bounds, d, t)
 			e.paintCodeWrapButton(p, bounds, d, t)
 			copied := d.id == e.copiedID && p.Now().Sub(e.copiedAt) < 1500*time.Millisecond
 			if !copied && !e.hovered(d.rect, 0) {
@@ -1892,6 +2061,9 @@ func (e *Editor) hoverControl(x, y float32) bool {
 		case d.kind == "code" && d.id != "" && canShowWrapButton(d) && in(wrapButton(d)) && (e.hovered(d.rect, 0) || e.isCodeNoWrap(e.blockByID(d.id))):
 			e.ToggleCodeWrap(d.id)
 			return true
+		case d.kind == "code" && d.id != "" && e.hasCodeExpandButton(d) && in(e.codeExpandRect(d)):
+			e.ToggleCodeExpand(d.id)
+			return true
 		case d.kind == "code" && d.id != "" && in(copyButton(d)) && e.hovered(d.rect, 0):
 			e.copyBlock(d.id)
 			return true
@@ -1907,6 +2079,8 @@ func (e *Editor) hoverControl(x, y float32) bool {
 			e.copyBlock(d.id)
 			return true
 		case (d.kind == "whiteboard" || d.kind == "whiteboard-embed") && d.id != "" && e.whiteboardControl(d, x, y):
+			return true
+		case d.kind == "pdf-embed" && d.id != "" && e.pdfControl(d, x, y):
 			return true
 		case d.kind == "table" && e.tableControl(d, x, y):
 			return true
@@ -1991,7 +2165,11 @@ func (e *Editor) paintMarker(p *ui.Painter, bounds ui.Rect, r row, t *ui.Theme) 
 			p.Fill(ui.Rect{X: x - 19.75, Y: cy - 2.5, W: 5, H: 5}, pg.Marker, 0)
 		}
 	case "numbered":
-		label := listNumber(max(1, r.number), r.leaf.Block.Indent) + "."
+		indent := r.leaf.Block.Indent
+		if e.mapListNumber > 0 {
+			indent = e.mapListIndent
+		}
+		label := listNumber(max(1, r.number), indent) + "."
 		span := ui.Span{Text: label, Size: 16, Color: pg.Marker, Features: "tnum"}
 		w, h := p.MeasureText(0, span)
 		p.RichText(x-6-w, cy-h/2, 0, span)
@@ -2054,32 +2232,51 @@ func (e *Editor) paintLineNumbers(p *ui.Painter, bounds ui.Rect, d decoration) {
 	clip := !e.printing && e.viewport > 0
 	visTop := e.Scroll.Y - 40
 	visBot := e.Scroll.Y + e.viewport + 40
-	pos := 0
-	at := 0
-	for i := 0; ; i++ {
-		nl := strings.IndexByte(text[pos:], '\n')
-		var line string
-		if nl < 0 {
-			line = text[pos:]
-		} else {
-			line = text[pos : pos+nl]
+	_, vClipBox, viewH, _, scrollY, compact := e.codeVScrollFor(*r)
+	drawNums := func() {
+		pos := 0
+		at := 0
+		for i := 0; ; i++ {
+			nl := strings.IndexByte(text[pos:], '\n')
+			var line string
+			if nl < 0 {
+				line = text[pos:]
+			} else {
+				line = text[pos : pos+nl]
+			}
+			caret := r.layout.Caret(at)
+			lineY := r.y + caret.Y - scrollY
+			if compact {
+				if caret.Y > scrollY+viewH+24 {
+					break
+				}
+				if caret.Y+max(caret.H, 22) >= scrollY-24 {
+					span := ui.Span{Text: strconv.Itoa(i + 1), Font: "monospace", Size: 14, Color: e.page.Caption, Features: "tnum"}
+					w, h := p.MeasureText(0, span)
+					p.RichText(bounds.X+d.rect.X+36-w, bounds.Y+lineY+(22-h)/2, 0, span)
+				}
+			} else {
+				if clip && lineY > visBot {
+					break
+				}
+				if !clip || lineY+max(caret.H, 22) >= visTop {
+					span := ui.Span{Text: strconv.Itoa(i + 1), Font: "monospace", Size: 14, Color: e.page.Caption, Features: "tnum"}
+					w, h := p.MeasureText(0, span)
+					p.RichText(bounds.X+d.rect.X+36-w, bounds.Y+lineY+(22-h)/2, 0, span)
+				}
+			}
+			if nl < 0 {
+				break
+			}
+			pos += nl + 1
+			at += document.Len(line) + 1
 		}
-		caret := r.layout.Caret(at)
-		lineY := r.y + caret.Y
-		if clip && lineY > visBot {
-			break
-		}
-		if !clip || lineY+max(caret.H, 22) >= visTop {
-			span := ui.Span{Text: strconv.Itoa(i + 1), Font: "monospace", Size: 14, Color: e.page.Caption, Features: "tnum"}
-			w, h := p.MeasureText(0, span)
-			p.RichText(bounds.X+d.rect.X+36-w, bounds.Y+lineY+(22-h)/2, 0, span)
-		}
-		if nl < 0 {
-			break
-		}
-		pos += nl + 1
-		at += document.Len(line) + 1
 	}
+	if compact {
+		p.Clip(ui.Rect{X: bounds.X + d.rect.X, Y: bounds.Y + vClipBox.Y, W: 54, H: vClipBox.H}, 0, drawNums)
+		return
+	}
+	drawNums()
 }
 
 // insertAfter opens a new paragraph below block id with the slash menu
@@ -2156,6 +2353,10 @@ func (e *Editor) structuralPointer(ev ui.InputEvent) bool {
 				}
 				if canShowWrapButton(d) && in(wrapButton(d)) && (e.hovered(d.rect, 0) || e.isCodeNoWrap(e.blockByID(d.id))) {
 					e.ToggleCodeWrap(d.id)
+					return true
+				}
+				if e.hasCodeExpandButton(d) && in(e.codeExpandRect(d)) {
+					e.ToggleCodeExpand(d.id)
 					return true
 				}
 				if in(copyButton(d)) && e.hovered(d.rect, 0) {
@@ -2425,9 +2626,13 @@ func bodyFamily(family string) string {
 	return family
 }
 
-// Padding is the page's margin either side of its text column, as last
-// laid out.
+// Padding is the left margin of the page's text column, as last laid out.
 func (e *Editor) Padding() float32 { return e.padding }
+
+// bodyWidth returns the prose column width between the left and right page margins.
+func (e *Editor) bodyWidth() float32 {
+	return max(80, e.width-e.padding-e.rightPadding)
+}
 
 // paintKeycaps draws 3-layer rounded 3D keycap surfaces behind Style.Kbd stretches.
 func (e *Editor) paintKeycaps(p *ui.Painter, bounds ui.Rect, r row) {

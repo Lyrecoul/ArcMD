@@ -105,6 +105,8 @@ type App struct {
 	wbCache   map[string]cachedWhiteboard
 	wbOrder   []string
 	wbLib     whiteboardLibState
+	pdfCache  map[string]cachedPDFDoc
+	pdfOrder  []string
 	// split owns the visible panes; doc and history follow its focused pane.
 	split           *splitGroup
 	paneNavigation  bool
@@ -195,7 +197,7 @@ type App struct {
 	slot         slotState
 	dragGrab     dragGrab
 	dragSettle   dragSettle
-	insertSeam   insertSeam
+	fileDrop     fileDropState
 	newDocPulse  time.Time
 	favDrop      *favDrop
 	// preview is the card a folder or a document shows when the pointer
@@ -205,8 +207,12 @@ type App struct {
 	library   library
 	spaceForm spaceForm
 	// settingsOpen shows the settings window on settingsTab.
-	settingsOpen bool
-	settingsTab  string
+	settingsOpen    bool
+	settingsTab     string
+	codeMaxHBuf     string
+	imageMaxHBuf    string
+	codeMaxHSynced  float32
+	imageMaxHSynced float32
 	// look is the window's look this frame, the two spaces either side
 	// mixed while paging; docTheme the system's theme the document's card
 	// keeps. paperDark is the active space's light or dark, which the
@@ -273,6 +279,7 @@ type App struct {
 	tour tour
 
 	runAsync             func(func())
+	remoteImages         remoteImageState
 	navDir               int
 	navAt                time.Time
 	keyGen               uint64
@@ -306,8 +313,7 @@ func New(cfg Config) (*App, error) {
 		bin:       trashbin.Bin{Dir: filepath.Join(cfg.ConfigDir, "trash")},
 		qa:        qaState{secrets: prefs.Secrets{Dir: filepath.Join(cfg.ConfigDir, "credentials")}},
 		// The spaces fade in on coming back from the library, not at start.
-		library:    library{frames: 1},
-		insertSeam: insertSeam{index: -1},
+		library: library{frames: 1},
 	}
 	if p, err := a.prefStore.Load(); err == nil {
 		a.prefs = p
@@ -763,6 +769,9 @@ func (a *App) imageResourceFor(d *document, url string) editor.ImageResource {
 	if d == nil || d.closed.Load() {
 		return editor.ImageResource{}
 	}
+	if isRemoteImageURL(url) {
+		return a.remoteImageResource(d, url)
+	}
 	key := imageKey{doc: d, url: url}
 	res, ok := a.imgResolved[key]
 	if !ok {
@@ -910,7 +919,7 @@ func (a *App) showIn(sp *space.Space, rel string) bool {
 		return false
 	}
 	restoring := a.doc == nil && sp.LastOpen == rel
-	text, err := readFile(sp, rel)
+	text, err := readDocSource(sp, rel)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if sp.IsExternal() {
@@ -965,7 +974,11 @@ func (a *App) showIn(sp *space.Space, rel string) bool {
 	if resident := a.residentDocument(sp.ID, rel); resident != nil {
 		if !resident.dirty() && resident.diskText != text {
 			replacement := openDocument(sp, rel, text, resident.source)
-			replacement.ed.Scroll = resident.ed.Scroll
+			if resident.isPDF() && replacement.isPDF() {
+				replacement.pdf.GoToPage(resident.pdf.CurrentPage, true)
+			} else {
+				replacement.ed.Scroll = resident.ed.Scroll
+			}
 			a.replaceReferences(resident, replacement)
 			resident = replacement
 		}
@@ -987,7 +1000,13 @@ func (a *App) showIn(sp *space.Space, rel string) bool {
 	}
 	a.retireClosedDocuments(prev, prevSessionDoc)
 	if a.paneNavigation {
-		a.doc.ed.RequestFocus = true
+		if a.doc.isPDF() {
+			a.doc.pdf.RequestFocus = true
+		} else if a.doc.isWhiteboard() {
+			a.doc.board.RequestFocus = true
+		} else {
+			a.doc.ed.RequestFocus = true
+		}
 	}
 	if a.search.async {
 		// The backlinks below the document read the index.
@@ -1081,12 +1100,15 @@ func (a *App) reload() {
 		return
 	}
 	rel, source := a.doc.rel, a.doc.source
-	text, err := readFile(a.doc.space, rel)
+	text, err := readDocSource(a.doc.space, rel)
 	if err != nil {
 		a.notify("重新载入 %s 失败。%v", vault.Title(rel), err)
 		return
 	}
 	next := openDocument(a.doc.space, rel, text, source)
+	if a.doc.isPDF() && next.isPDF() {
+		next.pdf.GoToPage(a.doc.pdf.CurrentPage, true)
+	}
 	a.search.writeSeq++
 	next.savedSeq = a.search.writeSeq
 	a.replaceReferences(a.doc, next)
@@ -1187,7 +1209,7 @@ func isUntitled(name string) bool {
 // by hand keeps its name. A title taken by another file is numbered.
 func (a *App) followTitle() {
 	d := a.doc
-	if d == nil || d.isWhiteboard() || d.space.IsExternal() || d.loadErr != nil || d.conflict || d.missing || !vault.IsDocument(d.rel) || d.dirty() {
+	if d == nil || d.isWhiteboard() || d.isPDF() || d.space.IsExternal() || d.loadErr != nil || d.conflict || d.missing || !vault.IsDocument(d.rel) || d.dirty() {
 		return
 	}
 	if _, composing := d.ed.MarkedRange(); composing {
@@ -1332,7 +1354,7 @@ func (a *App) finishRename(openDuplicated bool) {
 	}
 	if to != rel {
 		a.moved(sp, rel, to)
-		if vault.IsWhiteboard(rel) {
+		if vault.IsWhiteboard(rel) || vault.IsPDF(rel) {
 			a.relinkWhiteboardEmbed(sp, rel, to)
 		}
 		if vault.IsDocument(rel) {
@@ -1344,7 +1366,7 @@ func (a *App) finishRename(openDuplicated bool) {
 	}
 	if openPending && sp == a.state.ActiveSpace() && vault.IsDocument(to) {
 		a.open(to)
-		if d := a.doc; d != nil && d.space == sp && d.rel == to && d.loadErr == nil && !d.isWhiteboard() {
+		if d := a.doc; d != nil && d.space == sp && d.rel == to && d.loadErr == nil && !d.isWhiteboard() && !d.isPDF() {
 			d.ensureBodyParagraph()
 			leaves := d.ed.Doc.Leaves()
 			pos := 0
@@ -1637,7 +1659,7 @@ func writeNative(root, rel, markdown string) error {
 }
 
 func (a *App) exportMarkdown() {
-	if a.doc == nil || a.doc.loadErr != nil || a.doc.isWhiteboard() {
+	if a.doc == nil || a.doc.loadErr != nil || a.doc.isWhiteboard() || a.doc.isPDF() {
 		return
 	}
 	a.doc.ed.UnmarkText()

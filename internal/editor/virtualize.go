@@ -433,7 +433,7 @@ func (e *Editor) tableSpan(b *document.Block, pageW, bodyW float32) (x, w float3
 	if b == nil || b.Kind != "table" || b.Indent > 0 || e.printing || e.mapTablePreview || len(b.Children) == 0 || len(b.Children[0].Children) == 0 {
 		return e.padding, bodyW
 	}
-	availW := max(bodyW, pageW-156)
+	availW := max(bodyW, pageW-160)
 	if availW <= bodyW {
 		return e.padding, bodyW
 	}
@@ -1141,9 +1141,8 @@ func (e *Editor) materializeRows(targets []int, theme *ui.Theme) {
 		r.layout = cached.layout
 		_, h := cached.layout.Size()
 		h = max(h, m.font.Size*m.font.LineHeight)
-		newH := m.top + h + m.bottom
+		newH := e.applyCodeCompact(r, m.top, m.bottom, m.gap, h)
 		r.y = origY + m.top
-		r.rect.H = newH
 		if b.Kind == "math" {
 			newH = e.mathRow(r, h)
 			r.rect.H = newH

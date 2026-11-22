@@ -28,49 +28,75 @@ const (
 	mapPrepareBudget           = 8
 )
 
+// MapActions supplies host-level capabilities (creating documents, PNG/SVG
+// export, toast notifications) to the mind map without coupling editor to app.
+type MapActions struct {
+	ExtractBranch func(title, markdown string) (linkTarget string, ok bool)
+	CopyPNG       func(branchID string)
+	ExportPNG     func(branchID string)
+	ExportSVG     func(branchID string)
+	Notify        func(msg string)
+}
+
 // MindMap is a navigable projection of one editor. Geometry, scroll and folds
 // belong to the view; the document engine owns all text and selection.
 type MindMap struct {
-	gestureChanged  bool
-	movingUntil     time.Time
-	moving          bool
-	layers          map[*mapBody]bool
-	layoutRevision  uint64
-	wrapWidth       float32
-	importSource    string
-	importHints     map[string]document.ListPlacement
-	docTitle        string
-	rootEmpty       bool
-	caret           int
-	caretOwner      string
-	selected        string
-	focusID         string
-	locatePending   bool
-	foldInitialized bool
-	fitRequested    bool
-	tree            mindmap.State
-	panX, panY      float32
-	viewW, viewH    float32
-	zoom            float32
-	autoFit         bool
-	doc             *document.Document
-	revision        uint64
-	theme           ui.Theme
-	style           layoutPageKey
-	title           mindmap.Item
-	items           []mindmap.Item
-	itemIndex       map[string]int
-	ownerMap        map[string]string
-	bodies          map[string]*mapBody
-	cache           map[string]*cachedMapBlock
+	gestureChanged   bool
+	movingUntil      time.Time
+	moving           bool
+	layers           map[*mapBody]bool
+	layoutRevision   uint64
+	wrapWidth        float32
+	importSource     string
+	importHints      map[string]document.ListPlacement
+	docTitle         string
+	rootEmpty        bool
+	caret            int
+	caretOwner       string
+	selected         string
+	focusID          string
+	focusRoot        string
+	headingsOnly     bool
+	syncHeadingsOnly bool
+	actions          MapActions
+	locatePending    bool
+	foldInitialized  bool
+	fitRequested     bool
+	tree             mindmap.State
+	panX, panY       float32
+	viewW, viewH     float32
+	zoom             float32
+	autoFit          bool
+	doc              *document.Document
+	revision         uint64
+	theme            ui.Theme
+	style            layoutPageKey
+	title            mindmap.Item
+	items            []mindmap.Item
+	itemIndex        map[string]int
+	ownerMap         map[string]string
+	bodies           map[string]*mapBody
+	cache            map[string]*cachedMapBlock
 }
 
+// SetActions attaches host callbacks for branch extraction, image export and notifications.
+func (m *MindMap) SetActions(a MapActions) {
+	m.actions = a
+}
+
+// FocusRoot returns the currently focused branch ID, or "" when showing the full map.
+func (m *MindMap) FocusRoot() string { return m.focusRoot }
+
+// HeadingsOnly reports whether the mind map currently hides non-heading blocks.
+func (m *MindMap) HeadingsOnly() bool { return m.headingsOnly }
+
 type cachedMapBlock struct {
-	stamp    runsStamp
-	metaHash uint64
-	excerpt  string
-	rich     bool
-	body     *mapBody
+	stamp      runsStamp
+	metaHash   uint64
+	listNumber int
+	excerpt    string
+	rich       bool
+	body       *mapBody
 }
 
 type mapBody struct {
@@ -86,6 +112,7 @@ type mapBody struct {
 	rawW, rawH    float32
 	fitScale      float32
 	w, h          float32
+	listNumber    int
 	clipped       bool
 	heightClipped bool
 	isCode        bool
@@ -520,7 +547,16 @@ func (b *mapBody) needsMeasure(o Options) bool {
 		}
 		return !ok || scene != cached.scene || rev != cached.rev
 	}
-	if b.source.Kind == "image" && o.LoadImage != nil && len(b.editor.rows) == 1 {
+	if isPDFEmbed(b.source) && o.LoadPDF != nil {
+		clean, _ := ParsePDFURLPage(b.source.URL)
+		doc, rev, err := o.LoadPDF(clean)
+		cached, ok := b.editor.embedPDFs[clean]
+		if err != nil || doc == nil {
+			return ok
+		}
+		return !ok || doc != cached.doc || rev != cached.rev
+	}
+	if b.source.Kind == "image" && !isPDFEmbed(b.source) && o.LoadImage != nil && len(b.editor.rows) == 1 {
 		fig := b.editor.rows[0].picture
 		return fig != nil && fig.resource.Loading && !o.LoadImage(b.source.URL).Loading
 	}
@@ -580,6 +616,7 @@ func (b *mapBody) measure(o Options) {
 			block.Runs[j].Style.Bold = true
 		}
 	}
+	origIndent := block.Indent
 	block.Indent = 0
 	b.w = b.limit
 	if block.Kind == "table" {
@@ -588,6 +625,10 @@ func (b *mapBody) measure(o Options) {
 	ed := FromOwnedDocument(&document.Document{Blocks: []*document.Block{block}})
 	ed.mapTablePreview = block.Kind == "table"
 	ed.mapMathPreview = block.Kind == "math"
+	if block.Kind == "numbered" && b.listNumber > 0 {
+		ed.mapListNumber = b.listNumber
+		ed.mapListIndent = origIndent
+	}
 	o.Width = b.w + 92 // native page layout reserves 46 DIP on each side
 	o.FontSize = 14
 	ed.Paginate(o, 1e8)
@@ -633,9 +674,16 @@ func (b *mapBody) measure(o Options) {
 		for _, line := range r.layout.Lines() {
 			right = max(right, line.Rect.X+line.Rect.W)
 		}
+		if block.Kind == "numbered" {
+			label := listNumber(max(1, r.number), origIndent) + "."
+			lw, _ := ui.ShapeText(label, ui.Font{Family: bodyFamily(ed.fontFamily), Size: 16}, 0).Size()
+			if need := lw + 8; need > r.x-ed.padding {
+				b.span.X = r.x - need
+			}
+		}
 		b.span.Y = r.y
 		b.span.H = h
-		b.w = max(12, float32(math.Ceil(float64(r.x-ed.padding+right))))
+		b.w = max(12, float32(math.Ceil(float64(r.x-b.span.X+right))))
 	}
 	mermaidVisual := false
 	if isMermaidBlock(block) && len(ed.rows) == 1 {
@@ -656,7 +704,11 @@ func (b *mapBody) measure(o Options) {
 		b.span = ed.rows[0].boardRect
 		b.w = b.span.W
 	}
-	if block.Kind == "image" && !isWhiteboardEmbed(block) && len(ed.rows) == 1 {
+	if isPDFEmbed(block) && len(ed.rows) == 1 && ed.rows[0].pdfRect.W > 0 {
+		b.span = ed.rows[0].pdfRect
+		b.w = b.span.W
+	}
+	if block.Kind == "image" && !isWhiteboardEmbed(block) && !isPDFEmbed(block) && len(ed.rows) == 1 {
 		row := ed.rows[0]
 		if fig := row.picture; fig != nil && !ed.captionVisible(block) {
 			b.span = fig.bounds
@@ -825,7 +877,7 @@ func (b *mapBody) paint(p *ui.Painter, r ui.Rect, z float32, showBadge bool, t *
 func (m *MindMap) sync(e *Editor, o Options) {
 	doc := e.Doc
 	key := layoutPageKey{has: true, page: o.Page, fontFamily: o.FontFamily, lineHeight: o.LineHeight, column: m.wrapWidth}
-	reuse := m.theme == *o.Theme && sameLayoutPageKey(key, m.style)
+	reuse := m.theme == *o.Theme && sameLayoutPageKey(key, m.style) && m.syncHeadingsOnly == m.headingsOnly
 	if m.doc == doc && m.revision == e.Revision() && reuse && m.importSource == doc.ImportSource && m.docTitle == o.DocTitle {
 		return
 	}
@@ -849,6 +901,7 @@ func (m *MindMap) sync(e *Editor, o Options) {
 	}
 
 	m.layoutRevision++
+	m.syncHeadingsOnly = m.headingsOnly
 	m.theme = *o.Theme
 	m.style = key
 	m.style.page = clonePage(o.Page)
@@ -889,7 +942,7 @@ func (m *MindMap) sync(e *Editor, o Options) {
 			}
 			m.title = mindmap.Item{ID: rootBlk.ID, Text: fallbackTitle}
 		} else {
-			m.title = m.buildItem(rootBlk, 0, reuse, o.Theme)
+			m.title = m.buildItem(rootBlk, 0, 0, reuse, o.Theme)
 			// The root is always visible.
 			if body := m.bodies[m.title.ID]; body != nil && body.editor == nil && body.code == nil {
 				body.measure(o)
@@ -904,9 +957,23 @@ func (m *MindMap) sync(e *Editor, o Options) {
 	}
 
 	lastVisible := m.title.ID
-	var headings, lists []int
+	var headings, lists, counters []int
 	for _, b := range doc.Blocks[start:] {
-		if shouldSkipMapBlock(b) {
+		listNum := 0
+		switch b.Kind {
+		case "bullet", "task":
+			counters = counters[:min(len(counters), b.Indent)]
+		case "numbered":
+			counters = counters[:min(len(counters), b.Indent+1)]
+			for len(counters) <= b.Indent {
+				counters = append(counters, 0)
+			}
+			counters[b.Indent]++
+			listNum = counters[b.Indent]
+		default:
+			counters = nil
+		}
+		if shouldSkipMapBlock(b) || (m.headingsOnly && b.Kind != "heading") {
 			m.itemIndex[b.ID] = -2
 			m.ownerMap[b.ID] = lastVisible
 			if b.Kind == "paragraph" && b.Indent == 0 {
@@ -943,7 +1010,7 @@ func (m *MindMap) sync(e *Editor, o Options) {
 			lists = nil
 		}
 		m.itemIndex[b.ID] = len(m.items)
-		m.items = append(m.items, m.buildItem(b, depth, reuse, o.Theme))
+		m.items = append(m.items, m.buildItem(b, depth, listNum, reuse, o.Theme))
 		lastVisible = b.ID
 		if b.Kind == "heading" {
 			headings = append(headings, b.Level)
@@ -971,7 +1038,7 @@ func (m *MindMap) tryIncrementalUpdate(blk *document.Block, idx int, reuse bool,
 		if emptyNow {
 			return true
 		}
-		m.title = m.buildItem(blk, 0, reuse, o.Theme)
+		m.title = m.buildItem(blk, 0, 0, reuse, o.Theme)
 		if body := m.bodies[m.title.ID]; body != nil && body.editor == nil && body.code == nil {
 			body.measure(o)
 			m.title.Width, m.title.Height = body.w, body.h
@@ -982,7 +1049,11 @@ func (m *MindMap) tryIncrementalUpdate(blk *document.Block, idx int, reuse bool,
 		return false
 	}
 	depth := m.items[idx].Depth
-	item := m.buildItem(blk, depth, reuse, o.Theme)
+	listNum := 0
+	if entry := m.cache[blk.ID]; entry != nil {
+		listNum = entry.listNumber
+	}
+	item := m.buildItem(blk, depth, listNum, reuse, o.Theme)
 	if body := m.bodies[blk.ID]; body != nil {
 		body.measure(o)
 		item.Width, item.Height = body.w, body.h
@@ -1021,8 +1092,11 @@ func restoredListHints(doc *document.Document) map[string]document.ListPlacement
 	return hints
 }
 
-func (m *MindMap) buildItem(b *document.Block, depth int, reuse bool, t *ui.Theme) mindmap.Item {
+func (m *MindMap) buildItem(b *document.Block, depth int, listNumber int, reuse bool, t *ui.Theme) mindmap.Item {
 	st, mh := blockStamp(b)
+	if b != nil && b.Kind == "numbered" {
+		mh = fnvMixUint64(mh, uint64(listNumber))
+	}
 	entry := m.cache[b.ID]
 	unchanged := entry != nil && entry.stamp == st && entry.metaHash == mh
 	var excerpt string
@@ -1042,7 +1116,7 @@ func (m *MindMap) buildItem(b *document.Block, depth int, reuse bool, t *ui.Them
 			entry = &cachedMapBlock{}
 			m.cache[b.ID] = entry
 		}
-		entry.stamp, entry.metaHash = st, mh
+		entry.stamp, entry.metaHash, entry.listNumber = st, mh, listNumber
 		entry.excerpt, entry.rich = excerpt, rich
 		entry.body = nil
 	}
@@ -1065,6 +1139,7 @@ func (m *MindMap) buildItem(b *document.Block, depth int, reuse bool, t *ui.Them
 		entry.body = body
 	}
 	body.source = b
+	body.listNumber = listNumber
 	item.CodeBlock = b.Kind == "code" && b.Language != "mermaid" && !isWhiteboardBlock(b)
 	m.bodies[b.ID] = body
 	item.Image = b.Kind == "image" || b.Kind == "image_ref"
@@ -1390,6 +1465,14 @@ func (m *MindMap) View(c *ui.Context, e *Editor, o Options, width float32, color
 		v := sc.LayoutBounds()
 		m.viewW, m.viewH = v.W, v.H
 		sc.HandleInput(m.gesture)
+		if m.focusRoot != "" && sc.Shortcut(0, ui.KeyEscape) {
+			m.setFocusRoot("")
+			c.After(0)
+		}
+		viewRoot, viewItems, crumbs := m.viewTree()
+		sc.ContextMenu(func(menu *ui.Menu) {
+			m.buildCanvasMenu(menu, viewItems, bothSides, setBothSides, c)
+		})
 		if dx, dy, held := sc.Dragged(); held && (dx != 0 || dy != 0) {
 			m.pan(dx, dy)
 			sc.Cursor(ui.CursorGrabbing)
@@ -1424,11 +1507,11 @@ func (m *MindMap) View(c *ui.Context, e *Editor, o Options, width float32, color
 		preparedThisFrame := 0
 		moreToPrepare := false
 		sc.Children(func() {
-			tree := mindmap.View(c.Key("map-tree"), &m.tree, m.title, m.items, mindmap.Options{
+			tree := mindmap.View(c.Key("map-tree"), &m.tree, viewRoot, viewItems, mindmap.Options{
 				LayoutRevision: m.layoutRevision, Colors: colors, MaxWidth: m.wrapWidth, Locate: locate, BothSides: bothSides, Zoom: m.zoom, Selected: id, FocusID: focusID, Reveal: reveal, Pan: m.pan,
 				Visible: ui.Rect{X: -m.panX, Y: -m.panY, W: v.W, H: v.H},
 				Prepare: func(i int) bool {
-					item := &m.items[i]
+					item := &viewItems[i]
 					body := m.bodies[item.ID]
 					if body == nil || !body.needsMeasure(o) {
 						return false
@@ -1443,6 +1526,9 @@ func (m *MindMap) View(c *ui.Context, e *Editor, o Options, width float32, color
 					}
 					body.measure(o)
 					item.Width, item.Height = body.w, body.h
+					if fullIdx, ok := m.itemIndex[item.ID]; ok && fullIdx >= 0 && fullIdx < len(m.items) {
+						m.items[fullIdx].Width, m.items[fullIdx].Height = body.w, body.h
+					}
 					preparedThisFrame++
 					return true
 				},
@@ -1463,6 +1549,9 @@ func (m *MindMap) View(c *ui.Context, e *Editor, o Options, width float32, color
 					e.ScrollToBlock(targetID)
 					e.flashBlock(targetID)
 					c.After(0)
+				},
+				NodeMenu: func(menu *ui.Menu, nodeID string) {
+					m.buildNodeMenu(menu, c, e, nodeID, viewItems)
 				},
 				FoldLabel: i18n.T("折叠"), UnfoldLabel: i18n.T("展开"),
 			})
@@ -1489,6 +1578,9 @@ func (m *MindMap) View(c *ui.Context, e *Editor, o Options, width float32, color
 				m.locate(v)
 			}
 			tree.Absolute().Left(0).Top(0).TransformOrigin(0, 0).Transform(ui.Scaling(m.zoom, m.zoom).Then(ui.Translation(m.panX, m.panY)))
+			if len(crumbs) > 0 {
+				m.focusBreadcrumbs(c, t, crumbs)
+			}
 			if len(m.items) == 0 && e.Blank() {
 				ui.Column(c.Key("map-empty-hint")).Absolute().Left(16).Right(16).Bottom(24).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, i18n.T("输入标题、列表或段落，实时生成思维导图")).FontSize(12).TextColor(t.TextMuted).TextAlign(ui.Center)

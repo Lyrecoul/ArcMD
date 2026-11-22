@@ -50,13 +50,22 @@ func (e *Editor) InvalidateImage(src string) {
 	e.ready = false
 }
 
-// ClearImages releases all cached decoded image resources owned by this editor.
+// ClearImages releases all cached decoded image and embedded PDF bitmaps owned by this editor.
 func (e *Editor) ClearImages() {
-	if e == nil || e.images == nil {
+	if e == nil {
 		return
 	}
-	clear(e.images)
-	e.images = nil
+	if e.images != nil {
+		clear(e.images)
+		e.images = nil
+	}
+	for _, v := range e.pdfs {
+		if v != nil {
+			v.ClearBitmaps()
+		}
+	}
+	clear(e.pdfs)
+	e.pdfs = nil
 }
 
 type imageEnterState struct {
@@ -122,6 +131,9 @@ func (r ImageResource) frameAt(now time.Time) (*ui.Bitmap, time.Duration) {
 type imageFigure struct {
 	resource           ImageResource
 	bounds             ui.Rect
+	contentH           float32
+	compact            bool
+	expandable         bool
 	name               string
 	title, alt, reason *ui.TextLayout
 	altY, reasonY      float32
@@ -159,6 +171,36 @@ func (e *Editor) ReplaceImage(id, expected, next string) bool {
 	e.ready = false
 	e.sync()
 	return true
+}
+
+// ReplaceImageURLs replaces every image block URL present in replacements in a
+// single undoable edit, returning the number of blocks updated.
+func (e *Editor) ReplaceImageURLs(replacements map[string]string) int {
+	if e.ReadOnly || len(replacements) == 0 {
+		return 0
+	}
+	e.UnmarkText()
+	changed := 0
+	e.Engine.Edit(func() {
+		for _, leaf := range e.Doc.Leaves() {
+			if leaf.Block.Kind != "image" {
+				continue
+			}
+			next, ok := replacements[leaf.Block.URL]
+			if !ok || next == "" || next == leaf.Block.URL {
+				continue
+			}
+			delete(e.images, leaf.Block.URL)
+			delete(e.images, next)
+			leaf.Block.URL = next
+			changed++
+		}
+	})
+	if changed > 0 {
+		e.ready = false
+		e.sync()
+	}
+	return changed
 }
 
 func imageName(src string) string {
@@ -229,7 +271,15 @@ func (e *Editor) layoutImage(r *row, o Options) float32 {
 			// fixed height limit, so tall screenshots remain readable.
 			scale = min(scale, 850/float32(max(1, ih)))
 		}
-		pw, ph := float32(iw)*scale, float32(ih)*scale
+		pw, ph := min(w, float32(iw)*scale), float32(ih)*scale
+		f.contentH = ph
+		if !e.printing && e.imageMaxHeight > 0 && ph > e.imageMaxHeight {
+			f.expandable = true
+			if !e.imageExpanded[b.ID] {
+				f.compact = true
+				ph = e.imageMaxHeight
+			}
+		}
 		f.bounds = ui.Rect{X: x + (w-pw)/2, Y: y, W: pw, H: ph}
 		r.x, r.y = x, y+ph+8
 		bottom := y + ph
@@ -337,8 +387,13 @@ func (e *Editor) paintImage(p *ui.Painter, bounds ui.Rect, row row, t *ui.Theme)
 				}
 			}
 			p.Shadow(r, 8, 0, 2, 10, 0, e.page.ImageShadow)
+			barBox, viewH, contentH, scrollY, compact := e.imageVScrollFor(row)
 			p.Clip(r, 8, func() {
-				p.Image(bitmap, r, ui.Contain)
+				imgRect := r
+				if compact {
+					imgRect = ui.Rect{X: r.X, Y: r.Y - scrollY, W: r.W, H: contentH}
+				}
+				p.Image(bitmap, imgRect, ui.Contain)
 				if !e.printing && !e.reduceMotion && !f.resource.LoadedAt.IsZero() {
 					const fadeDur = 120 * time.Millisecond
 					if elapsed := p.Now().Sub(f.resource.LoadedAt); elapsed >= 0 && elapsed < fadeDur {
@@ -348,7 +403,21 @@ func (e *Editor) paintImage(p *ui.Painter, bounds ui.Rect, row row, t *ui.Theme)
 						p.AnimationFrame()
 					}
 				}
+				if compact && scrollY < contentH-viewH-1 {
+					fadeH := min(float32(36), r.H)
+					paintBottomFade(p, ui.Rect{
+						X: r.X,
+						Y: r.Y + r.H - fadeH,
+						W: r.W,
+						H: fadeH,
+					}, t.Background, 0.80)
+				}
 			})
+			if compact && (e.hovered(f.bounds, 0) || e.imageVBarDrag == row.leaf.Block.ID || scrollY > 0) {
+				barBox.X += bounds.X + dx
+				barBox.Y += bounds.Y + dy
+				p.Scrollbar(ui.Scrollbar{Box: barBox, Horizontal: false, View: viewH, Content: contentH, Offset: scrollY}, ui.ScrollbarState{Dragging: e.imageVBarDrag == row.leaf.Block.ID})
+			}
 			if !e.printing && e.imageResize.id == row.leaf.Block.ID && row.rect.W > 0 {
 				pct := max(1, min(100, int(math.Round(float64(f.bounds.W/row.rect.W*100)))))
 				txt := ui.ShapeText(fmt.Sprintf("%d%%", pct), ui.Font{Family: "system-ui", Size: 12, Weight: 600}, 0)
@@ -420,7 +489,7 @@ func (e *Editor) paintFileDropPreview(p *ui.Painter, bounds ui.Rect, t *ui.Theme
 		return
 	}
 	y := bounds.Y + e.fileOver - 4
-	slot := ui.Rect{X: bounds.X + e.padding, Y: y - 14, W: max(48, e.width-2*e.padding), H: 28}
+	slot := ui.Rect{X: bounds.X + e.padding, Y: y - 14, W: max(48, e.bodyWidth()), H: 28}
 	p.Fill(slot, t.Accent.Alpha(0.06), 7)
 	p.StrokeDashed(slot, t.Accent.Alpha(0.65), 7, 1.25)
 	hint := ui.ShapeText(i18n.T("松手插入图片"), ui.Font{Family: "system-ui", Size: 12, Weight: 500}, 0)
@@ -504,6 +573,9 @@ func (e *Editor) imageControls(c *ui.Context, o Options) {
 			}
 		}
 		picture.HandleInput(func(ev ui.InputEvent) bool {
+			if e.handleImageBoxInput(id, r, ev) {
+				return true
+			}
 			if ev.Kind != ui.InputKeyDown {
 				return false
 			}
@@ -537,6 +609,13 @@ func (e *Editor) imageControls(c *ui.Context, o Options) {
 		}
 		picture.ContextMenu(func(m *ui.Menu) {
 			menuAction(m, i18n.T("放大查看"), open)
+			if f.expandable {
+				toggleLabel := i18n.T("展开完整图片")
+				if !f.compact {
+					toggleLabel = i18n.T("收起图片")
+				}
+				menuAction(m, toggleLabel, func() { e.ToggleImageExpand(id) })
+			}
 			if !e.ReadOnly {
 				menuAction(m, i18n.T("编辑图片说明…"), func() {
 					e.FocusBlock(id)
@@ -559,6 +638,19 @@ func (e *Editor) imageControls(c *ui.Context, o Options) {
 			button.Background(e.page.Popover)
 			if button.Clicked() {
 				open()
+			}
+		}
+		if f.expandable && r.W >= 100 && r.H >= 72 {
+			toggleLabel := i18n.T("展开完整图片")
+			if !f.compact {
+				toggleLabel = i18n.T("收起图片")
+			}
+			tw, _ := ui.ShapeText(toggleLabel, ui.Font{Family: "system-ui", Size: 13}, 0).Size()
+			bw := min(r.W-16, max(float32(96), tw+28))
+			btn := e.imageButton(key.Key("expand"), toggleLabel, ui.Rect{X: r.X + (r.W-bw)/2, Y: r.Y + r.H - 36, W: bw, H: 28})
+			btn.Background(e.page.Popover.Alpha(0.92))
+			if btn.Clicked() {
+				e.ToggleImageExpand(id)
 			}
 		}
 	}

@@ -99,18 +99,34 @@ func isImage(name string) bool {
 // pictures, folders included, are left out with a notice, as Markdown
 // has no attachments.
 func (a *App) insertImages(paths []string, at int) {
-	if a.doc == nil || a.doc.ed.ReadOnly {
+	if a.doc == nil || a.doc.isWhiteboard() || a.doc.isPDF() || a.doc.ed.ReadOnly {
 		return
 	}
 	d := a.doc
 	if d == nil || d.loadErr != nil || d.source {
 		return
 	}
+	autoUpload := a.imageHostAutoUploadEnabled()
 	var blocks []*model.Block
+	var toUpload []pendingImage
 	var skipped []string
 	for _, src := range paths {
-		if info, err := os.Stat(src); err == nil && info.IsDir() || !isImage(src) {
+		info, statErr := os.Stat(src)
+		if statErr == nil && info.IsDir() || (!isImage(src) && !vault.IsPDF(src)) {
 			skipped = append(skipped, filepath.Base(src))
+			continue
+		}
+		if autoUpload && isImage(src) {
+			data, err := os.ReadFile(src)
+			if err != nil {
+				a.notify("插入 %s 失败。%v", filepath.Base(src), err)
+				continue
+			}
+			toUpload = append(toUpload, pendingImage{
+				name: filepath.Base(src),
+				alt:  filepath.Base(src),
+				data: data,
+			})
 			continue
 		}
 		rel, _, err := a.copyAsset(path.Dir(d.rel), src)
@@ -121,19 +137,33 @@ func (a *App) insertImages(paths []string, at int) {
 		blocks = append(blocks, imageBlock(filepath.Base(src), rel))
 	}
 	if len(skipped) > 0 {
-		a.notify("只能插入图片（%s）：%s 未插入。", strings.Join(imageExtensions, "、"), strings.Join(skipped, "、"))
+		supported := append(slices.Clone(imageExtensions), "pdf")
+		a.notify("只能插入图片或 PDF（%s）：%s 未插入。", strings.Join(supported, "、"), strings.Join(skipped, "、"))
 	}
 	a.placeImages(blocks, at)
+	if len(toUpload) > 0 {
+		a.uploadImagesViaHost(d, toUpload, at)
+	}
 }
 
 // pasteImage saves a picture pasted from the clipboard beside the document
-// as a PNG and inserts it at the caret.
+// as a PNG and inserts it at the caret, or uploads it to the configured
+// image-host plugin when enabled.
 func (a *App) pasteImage(png []byte) {
 	if a.doc == nil || a.doc.ed.ReadOnly {
 		return
 	}
 	d := a.doc
 	if d == nil || d.loadErr != nil || d.source {
+		return
+	}
+	if a.imageHostAutoUploadEnabled() {
+		a.uploadImagesViaHost(d, []pendingImage{{
+			name:        i18n.T("粘贴的图片.png"),
+			alt:         i18n.T("粘贴的图片"),
+			contentType: "image/png",
+			data:        png,
+		}}, -1)
 		return
 	}
 	rel, err := a.writeAsset(path.Dir(d.rel), i18n.T("粘贴的图片.png"), png)
@@ -169,7 +199,13 @@ func (a *App) placeImages(blocks []*model.Block, at int) {
 			}
 		})
 	}
-	ed.FocusInsertedImage(blocks[len(blocks)-1].ID)
+	last := blocks[len(blocks)-1]
+	if vault.IsPDF(last.URL) {
+		ed.FocusBlock(last.ID)
+		ed.RequestFocus = true
+		return
+	}
+	ed.FocusInsertedImage(last.ID)
 }
 
 // copyAsset copies the file at src into the folder assets beside the
